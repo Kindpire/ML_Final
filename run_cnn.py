@@ -10,21 +10,22 @@ import datetime
 import data_loader
 from text_cnn import TextCNN
 import six.moves.cPickle as pkl
-
+from termcolor import colored
+import pandas as pd
 # Parameters
 # ==================================================
 
 # Model Hyperparameters
 tf.flags.DEFINE_integer("embedding_dim", 128, "Dimensionality of character embedding (default: 128)")
-tf.flags.DEFINE_string("filter_sizes", "3,4,5", "Comma-separated filter sizes (default: '3,4,5')")
+tf.flags.DEFINE_string("filter_sizes", "2,3,4", "Comma-separated filter sizes (default: '3,4,5')")
 tf.flags.DEFINE_integer("num_filters", 128, "Number of filters per filter size (default: 128)")
 tf.flags.DEFINE_float("dropout_keep_prob", 0.5, "Dropout keep probability (default: 0.5)")
 tf.flags.DEFINE_float("l2_reg_lambda", 0.0, "L2 regularizaion lambda (default: 0.0)")
 
 # Training parameters
 tf.flags.DEFINE_integer("batch_size", 64, "Batch Size (default: 64)")
-tf.flags.DEFINE_integer("num_epochs", 1, "Number of training epochs (default: 200)")
-tf.flags.DEFINE_integer("evaluate_every", 30, "Evaluate model on dev set after this many steps (default: 100)")
+tf.flags.DEFINE_integer("num_epochs", 100, "Number of training epochs (default: 200)")
+tf.flags.DEFINE_integer("evaluate_every", 100, "Evaluate model on dev set after this many steps (default: 100)")
 tf.flags.DEFINE_integer("checkpoint_every", 100, "Save model after this many steps (default: 100)")
 # Misc Parameters
 tf.flags.DEFINE_boolean("allow_soft_placement", True, "Allow device soft device placement")
@@ -44,6 +45,19 @@ print("")
 # Load data
 print("Loading data...")
 raw_train, raw_test, x, y, x_test, vocabulary = data_loader.load_data()
+print "x_test is:", type(x_test), len(x_test), len(raw_test)
+
+#test if my predict function is right
+testfile = pd.DataFrame()
+testfile = pd.read_csv("./data/answer.csv")
+y_test = testfile.loc[:,'labels'].values
+y_test = data_loader.convert_y(y_test)
+y_test = np.array(y_test)
+sampled_x_test = x_test[0:5000]
+sampled_y_test = y_test[0:5000]
+
+max_acc = 0
+max_checkpoint = ""
 # Randomly shuffle data
 np.random.seed(10)
 shuffle_indices = np.random.permutation(np.arange(len(y)))
@@ -74,7 +88,7 @@ with tf.Graph().as_default():
         cnn = TextCNN(
             sequence_length=x_train.shape[1],
             num_classes=2,
-            vocab_size=len(vocabulary),
+            vocab_size=len(vocabulary)+2, #need +2 here because our vocab not start at 0
             embedding_size=FLAGS.embedding_dim,
             filter_sizes=map(int, FLAGS.filter_sizes.split(",")),
             num_filters=FLAGS.num_filters,
@@ -157,6 +171,7 @@ with tf.Graph().as_default():
             print("Dev: {}: step {}, loss {:g}, acc {:g}".format(time_str, step, loss, accuracy))
             if writer:
                 writer.add_summary(summaries, step)
+            return accuracy
 
         def predict_step(x_batch, y_batch):
             """
@@ -167,19 +182,13 @@ with tf.Graph().as_default():
               cnn.input_y: y_batch,
               cnn.dropout_keep_prob: 1.0
             }
-            step, predictions = sess.run(
-                [global_step, cnn.predictions],
+            step, output, scores = sess.run(
+                [global_step, cnn.predictions, cnn.scores],
                 feed_dict)
-            print("Got Predictions.")
-            print(type(predictions))
-            f = open('./data/predictions.pkl', 'wb')
-            pkl.dump(predictions, f, -1)
-            f.close()
-            print("Done!")
+            return output, scores
 
         # Generate batches
-        batches = data_loader.batch_iter(
-            zip(x_train, y_train), FLAGS.batch_size, FLAGS.num_epochs)
+        batches = data_loader.batch_iter(zip(x_train, y_train), FLAGS.batch_size, FLAGS.num_epochs)
         # Training loop. For each batch...
         for batch in batches:
             x_batch, y_batch = zip(*batch)
@@ -187,12 +196,19 @@ with tf.Graph().as_default():
             current_step = tf.train.global_step(sess, global_step)
             if current_step % FLAGS.evaluate_every == 0:
                 print("\nEvaluation:")
-                print(type(x_dev),type(y_dev))
-                dev_step(x_dev, y_dev, writer=dev_summary_writer)
-                # print("This is the test result")
-                # dev_step(x_test, y_test, writer=dev_summary_writer)
-                # predict_step(x_test, y_test)
+
+                dev_acc = dev_step(x_dev, y_dev, writer=dev_summary_writer)
+                if dev_acc > 0.9:
+                    if dev_acc > max_acc:
+                        max_acc = dev_acc
+                        max_checkpoint = current_step
+                        print "The max acc now is:", colored(max_acc, "red"), "step is:", colored(max_checkpoint, "red")
+                        predictions, scores = predict_step(x_test, y_test)
+                        print colored(sum(predictions),"red"), type(scores), colored(sum(scores),"red")
+                        data_loader.write2csv(predictions)
                 print("")
+
             if current_step % FLAGS.checkpoint_every == 0:
                 path = saver.save(sess, checkpoint_prefix, global_step=current_step)
                 print("Saved model checkpoint to {}\n".format(path))
+        print "The max acc now is:", colored(max_acc, "red"), "step is:", colored(max_checkpoint, "red")
